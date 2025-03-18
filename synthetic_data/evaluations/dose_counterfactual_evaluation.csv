@@ -1,0 +1,2 @@
+scenario,mse,rmse,mae,mean_glucose_diff,max_glucose_diff,min_glucose_diff,time_in_range,time_in_range_diff
+0,395.734623015873,19.893079777044907,13.610615079365079,13.481646825396822,23,15,98.16468253968253,3.025793650793645

@@ -1,0 +1,95 @@
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from causalimpact import CausalImpact
+import statsmodels.formula.api as smf
+
+# Define paths
+data_path = os.path.join("..", "synthetic_data", "data", "dose_counterfactuals")
+output_path = os.path.join("..", "output", "model_evaluation")
+os.makedirs(output_path, exist_ok=True)
+
+# Load synthetic datasets
+dataset_files = [f for f in os.listdir(data_path) if f.startswith("insulin_factor_") and f.endswith(".csv")]
+datasets = {}
+
+for file in dataset_files:
+    factor = file.replace("insulin_factor_", "").replace("_", ".").replace(".csv", "")
+    df = pd.read_csv(os.path.join(data_path, file), index_col=0)
+    df.index = pd.to_datetime(df.index)
+    datasets[factor] = df
+
+print(f"Loaded {len(datasets)} datasets with insulin factors: {', '.join(sorted(datasets.keys()))}")
+
+# Evaluate model for each dataset
+results = []
+
+for factor, data in datasets.items():
+    print(f"\nEvaluating model for insulin factor: {factor}")
+    
+    # Identify insulin events
+    insulin_events = data.index[data['insulin'] > 0]
+    filtered_events = []
+    last_event = None
+
+    for event in insulin_events:
+        if last_event is None or (event - last_event).total_seconds() >= 3600:
+            filtered_events.append(event)
+            last_event = event
+
+    print(f"Found {len(filtered_events)} filtered insulin events for factor {factor}")
+
+    # Analyze each event
+    for event_idx, event in enumerate(filtered_events[:5]):  # Limit to first 5 events for speed
+        print(f"Processing event {event_idx + 1}/{len(filtered_events)} at {event}")
+        
+        try:
+            # Define window around the event
+            window_start = event - pd.Timedelta("45min")
+            window_end = event + pd.Timedelta("30min")
+            window_data = data.loc[window_start:window_end].copy()
+            window_data = window_data.fillna(method='ffill')
+
+            # Define pre/post periods
+            closest_pre = window_data.index[window_data.index <= event].max()
+            closest_post = window_data.index[window_data.index > event].min()
+
+            if pd.isna(closest_pre) or pd.isna(closest_post):
+                print(f"Skipping event - cannot establish pre/post boundaries")
+                continue
+
+            pre_period = [window_data.index.min(), closest_pre]
+            post_period = [closest_post, window_data.index.max()]
+
+            # Run CausalImpact
+            ci_data = window_data[['glucose']].copy()
+            ci_data = ci_data.replace([np.inf, -np.inf], np.nan).dropna()
+            impact = CausalImpact(ci_data, pre_period, post_period)
+
+            # Extract results
+            avg_effect = impact.inferences['point_effects'].mean()
+            cum_effect = impact.inferences['post_cum_effects'].iloc[-1]
+
+            # Save results
+            results.append({
+                "factor": factor,
+                "event_time": event,
+                "avg_effect": avg_effect,
+                "cum_effect": cum_effect
+            })
+
+            # Save impact plot
+            impact.plot()
+            plt.savefig(os.path.join(output_path, f"factor_{factor}_event_{event_idx}_impact.png"))
+            plt.close()
+
+            print(f"Event {event_idx + 1}: Avg Effect = {avg_effect:.2f}, Cum Effect = {cum_effect:.2f}")
+
+        except Exception as e:
+            print(f"Error processing event {event_idx + 1}: {e}")
+
+# Save results to CSV
+results_df = pd.DataFrame(results)
+results_df.to_csv(os.path.join(output_path, "evaluation_results.csv"), index=False)
+print(f"\nEvaluation completed. Results saved to {output_path}")

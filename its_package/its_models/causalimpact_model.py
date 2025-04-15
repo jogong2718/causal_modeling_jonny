@@ -1,12 +1,11 @@
-import pandas as pd
+import warnings
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
+import os
 from causalimpact import CausalImpact
 from .base import BaseITSModel
-import os
-import pickle
 from datetime import datetime
-import warnings
 
 # Suppress specific pandas warnings from CausalImpact
 warnings.filterwarnings("ignore", message="Series.__getitem__ treating keys as positions is deprecated", category=FutureWarning)
@@ -43,11 +42,11 @@ class CausalImpactModel(BaseITSModel):
         """
         # Handle edge cases first
         if data.empty:
-            raise ValueError("Empty dataset provided")
+            raise ValueError("Empty data provided for model fitting")
         
         # Ensure we have at least one predictor variable
         if data.shape[1] <= 1:
-            raise ValueError("CausalImpact requires at least one covariate/predictor variable")
+            raise ValueError("Data must have at least one predictor variable")
         
         # Clean data - replace infinities, drop NAs, and ensure column variability
         clean_data = data.replace([np.inf, -np.inf], np.nan)
@@ -58,15 +57,21 @@ class CausalImpactModel(BaseITSModel):
         
         # Check if we still have enough data
         if clean_data.empty or clean_data.shape[1] <= 1:
-            raise ValueError("After cleaning, not enough data or variables remain")
+            raise ValueError("After cleaning, data is insufficient for modeling")
         
         # Handle columns with constant values in pre-period
         pre_data = clean_data.loc[pre_period[0]:pre_period[1]].copy()
         for col in pre_data.columns:
             if pre_data[col].nunique() == 1:
-                constant_val = pre_data[col].iloc[0]
-                # Add a small variation to avoid constant values
-                clean_data.loc[pre_period[1], col] = constant_val + 1
+                # Add small noise to avoid constant values
+                std_dev = clean_data[col].std()
+                if std_dev == 0:
+                    std_dev = 0.01 * clean_data[col].mean()
+                    if std_dev == 0:
+                        std_dev = 0.1  # Fallback if mean is also 0
+                
+                # Add small random noise to the column
+                clean_data[col] = clean_data[col] + np.random.normal(0, std_dev/10, len(clean_data))
         
         # Store processed data
         self.data = clean_data
@@ -89,18 +94,30 @@ class CausalImpactModel(BaseITSModel):
             Dictionary of results
         """
         if self.impact is None:
-            raise ValueError("Model not fitted yet")
+            raise ValueError("Model has not been fit yet")
         
         # Extract key results
         post_inferences = self.impact.inferences.loc[self.impact.inferences.index >= self.post_period[0]]
         
+        # Calculate mean effect
+        avg_effect = post_inferences['point_effects'].mean()
+        cum_effect = post_inferences['post_cum_effects'].iloc[-1]
+        
+        # Calculate p-value
+        p_value = self.impact.summary_data.get('p', 1.0)
+        
+        # Calculate confidence intervals
+        effect_lower = post_inferences['point_effects_lower'].mean()
+        effect_upper = post_inferences['point_effects_upper'].mean()
+        
         results = {
-            'avg_effect': post_inferences['point_effect'].mean(),
-            'cum_effect': post_inferences['cum_effect'].iloc[-1],
-            'post_pred_mean': post_inferences['point_pred'].mean(),
-            'post_pred_lower': post_inferences['point_pred_lower'].mean(),
-            'post_pred_upper': post_inferences['point_pred_upper'].mean(),
-            'model_summary': self.impact.summary()
+            'avg_effect': avg_effect,
+            'cum_effect': cum_effect,
+            'p_value': p_value,
+            'significant': p_value < 0.05,
+            'effect_lower': effect_lower,
+            'effect_upper': effect_upper,
+            'post_data': post_inferences
         }
         
         return results
@@ -119,77 +136,118 @@ class CausalImpactModel(BaseITSModel):
         Returns:
         --------
         matplotlib.figure.Figure
-            Figure with plot
+            Figure with the plot
         """
         if self.impact is None:
-            raise ValueError("Model not fitted yet")
+            raise ValueError("Model has not been fit yet")
         
-        fig = self.impact.plot()
+        if fig is None:
+            fig = plt.figure(figsize=figsize)
+        
+        self.impact.plot(panels=['original', 'pointwise', 'cumulative'])
+        plt.tight_layout()
         
         return fig
     
     def plot_original_data(self, target_col='glucose', figsize=(12, 6)):
         """
-        Plot the original data with intervention time.
+        Plot the original data with intervention point.
         
         Parameters:
         -----------
         target_col : str
-            Name of the target column to plot
+            Name of the target column
         figsize : tuple
             Size of the figure
             
         Returns:
         --------
         matplotlib.figure.Figure
-            Figure with plot
+            Figure with the plot
         """
         if self.data is None:
-            raise ValueError("Model not fitted yet")
+            raise ValueError("No data available")
         
         fig = plt.figure(figsize=figsize)
         
-        # Plot target variable
+        # Plot the data
         plt.plot(self.data.index, self.data[target_col], 'b-', label=target_col)
         
-        # Mark intervention time
+        # Mark the intervention
         intervention_time = self.pre_period[1]
         plt.axvline(x=intervention_time, color='r', linestyle='--', label='Intervention')
         
-        plt.title(f'Original Data with Intervention at {intervention_time}')
+        # Add labels and legend
+        plt.xlabel('Time')
         plt.ylabel(target_col)
+        plt.title('Time Series Data with Intervention Point')
         plt.legend()
+        plt.grid(True, alpha=0.3)
         
         return fig
     
-    def save_model(self, filename=None):
+    def save_plot(self, filename=None):
         """
-        Save the trained model to a file.
+        Save the plot to a file.
         
         Parameters:
         -----------
-        filename : str, optional
-            Path to save the model. If None, a default name will be used.
+        filename : str
+            Name of the file to save the plot to
         """
-        if self.impact is None:
-            raise ValueError("Model has not been trained. Call fit() first.")
+        if self.output_dir is None:
+            raise ValueError("Output directory not set")
         
         if filename is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"causalimpact_model_{timestamp}.pkl"
+            filename = f"causalimpact_plot_{timestamp}.png"
         
-        model_data = {
-            'model': self.impact,
-            'type': 'causalimpact',
-            'info': {
-                'training_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                'pre_period': self.pre_period,
-                'post_period': self.post_period
-            }
+        filepath = os.path.join(self.output_dir, filename)
+        
+        # Create the plot
+        fig = self.plot()
+        
+        # Save the plot
+        fig.savefig(filepath)
+        plt.close(fig)
+        
+        print(f"Plot saved to {filepath}")
+        
+    def save_model(self, filename=None):
+        """
+        Save the model to a file.
+        
+        Parameters:
+        -----------
+        filename : str
+            Name of the file to save the model to
+        """
+        if self.output_dir is None:
+            raise ValueError("Output directory not set")
+        
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"causalimpact_model_{timestamp}.json"
+        
+        filepath = os.path.join(self.output_dir, filename)
+        
+        if self.impact is None:
+            raise ValueError("Model has not been fit yet")
+        
+        # Get the summary data
+        summary_data = self.impact.summary_data
+        
+        # Convert to serializable format
+        results = {
+            'pre_period': [str(x) for x in self.pre_period],
+            'post_period': [str(x) for x in self.post_period],
+            'summary': {k: float(v) if isinstance(v, (int, float, np.number)) else str(v) 
+                       for k, v in summary_data.items()}
         }
         
-        with open(filename, 'wb') as f:
-            pickle.dump(model_data, f)
+        # Save to file
+        import json
+        with open(filepath, 'w') as f:
+            json.dump(results, f, indent=4)
         
-        print(f"Model saved to {filename}")
-        return filename
+        print(f"Model saved to {filepath}")

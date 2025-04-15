@@ -612,3 +612,195 @@ class ITSPredictor:
             'dose_response': dict(zip(dose_values, glucose_values)),
             'time_point': time_point
         }
+    
+    def maximize_time_in_range(self, pre_period_data, intervention_time, dose_range,
+                              low_threshold=80, high_threshold=130, post_period="2h",
+                              model_type="ensemble", time_frequency="5min", n_steps=10):
+        """
+        Find the optimal insulin dose to maximize time in range for glucose levels
+        
+        Parameters:
+        -----------
+        pre_period_data : DataFrame
+            Data for the pre-intervention period
+        intervention_time : datetime or str
+            Time of the intervention
+        dose_range : tuple
+            (min_dose, max_dose) range to search
+        low_threshold : float
+            Lower bound of target glucose range (default: 80 mg/dL)
+        high_threshold : float
+            Upper bound of target glucose range (default: 130 mg/dL)
+        post_period : str
+            Length of post-period to predict
+        model_type : str, optional
+            Type of model to use for prediction
+        time_frequency : str, optional
+            Time frequency for prediction points
+        n_steps : int, optional
+            Number of doses to evaluate in the range
+            
+        Returns:
+        --------
+        dict
+            Results of optimization including optimal dose and time in range metrics
+        """
+        min_dose, max_dose = dose_range
+        doses = np.linspace(min_dose, max_dose, n_steps)
+        
+        # Convert intervention_time to datetime if it's a string
+        if isinstance(intervention_time, str):
+            intervention_time = pd.to_datetime(intervention_time)
+            
+        # Get predictions for each dose
+        results = {}
+        dose_values = []
+        tir_values = []  # Time in range percentages
+        
+        for dose in doses:
+            predictions = self.predict_glucose(
+                pre_period_data=pre_period_data,
+                intervention_time=intervention_time,
+                post_period_length=post_period,
+                intervention_value=dose,
+                model_type=model_type,
+                time_frequency=time_frequency
+            )
+            
+            # Calculate time in range (percentage of post-period predictions within target range)
+            in_range = ((predictions['predicted'] >= low_threshold) & 
+                        (predictions['predicted'] <= high_threshold))
+            time_in_range = in_range.mean() * 100  # Convert to percentage
+            
+            # Calculate additional metrics (optional)
+            below_range = (predictions['predicted'] < low_threshold).mean() * 100
+            above_range = (predictions['predicted'] > high_threshold).mean() * 100
+            
+            # Calculate mean glucose and glucose variability
+            mean_glucose = predictions['predicted'].mean()
+            glucose_std = predictions['predicted'].std()
+            
+            results[dose] = {
+                'time_in_range': time_in_range,
+                'below_range': below_range,
+                'above_range': above_range,
+                'mean_glucose': mean_glucose,
+                'glucose_std': glucose_std,
+                'predictions': predictions
+            }
+            
+            dose_values.append(dose)
+            tir_values.append(time_in_range)
+            
+        # Find optimal dose that maximizes time in range
+        optimal_idx = np.argmax(tir_values)
+        optimal_dose = dose_values[optimal_idx]
+        optimal_tir = tir_values[optimal_idx]
+        optimal_stats = results[optimal_dose]
+        
+        print(f"Optimal dose: {optimal_dose:.2f}u → Time in range: {optimal_tir:.1f}% (Target range: {low_threshold}-{high_threshold} mg/dL)")
+        print(f"Mean glucose: {optimal_stats['mean_glucose']:.1f} mg/dL, Std: {optimal_stats['glucose_std']:.1f} mg/dL")
+        print(f"Below range: {optimal_stats['below_range']:.1f}%, Above range: {optimal_stats['above_range']:.1f}%")
+        
+        # Create figure showing dose-response relationship for time in range
+        plt.figure(figsize=(10, 6))
+        plt.plot(dose_values, tir_values, 'bo-')
+        plt.axvline(x=optimal_dose, color='r', linestyle='--', label=f'Optimal: {optimal_dose:.2f}u')
+        plt.xlabel('Insulin Dose (units)')
+        plt.ylabel('Time in Range (%)')
+        plt.title(f'Insulin Dose vs. Time in Range {low_threshold}-{high_threshold} mg/dL')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        return {
+            'optimal_dose': optimal_dose,
+            'optimal_tir': optimal_tir,
+            'low_threshold': low_threshold,
+            'high_threshold': high_threshold,
+            'mean_glucose': optimal_stats['mean_glucose'],
+            'glucose_std': optimal_stats['glucose_std'],
+            'below_range': optimal_stats['below_range'],
+            'above_range': optimal_stats['above_range'],
+            'dose_response': dict(zip(dose_values, tir_values)),
+            'all_results': results
+        }
+
+    def plot_time_in_range_comparison(self, pre_period_data, counterfactual_results, 
+                                     intervention_time, low_threshold=80, high_threshold=130,
+                                     target_col='glucose', figsize=(14, 10), output_path=None):
+        """
+        Plot comparison of different doses with time-in-range highlighted
+        
+        Parameters:
+        -----------
+        pre_period_data : DataFrame
+            Original pre-period data
+        counterfactual_results : dict
+            Dictionary mapping doses to prediction DataFrames
+        intervention_time : datetime
+            Time of intervention
+        low_threshold : float
+            Lower bound of target glucose range
+        high_threshold : float
+            Upper bound of target glucose range
+        target_col : str
+            Name of target column
+        figsize : tuple
+            Figure size
+        output_path : str, optional
+            Path to save the plot
+        """
+        plt.figure(figsize=figsize)
+        
+        # Plot pre-period data
+        if target_col in pre_period_data.columns:
+            plt.plot(pre_period_data.index, pre_period_data[target_col], 'b-', label='Historical Data')
+        else:
+            plt.plot(pre_period_data.index, pre_period_data['response'], 'b-', label='Historical Data')
+            
+        # Color map for different doses
+        n_doses = len(counterfactual_results)
+        colors = plt.cm.rainbow(np.linspace(0, 1, n_doses))
+        
+        # Plot each counterfactual with time-in-range highlighted
+        for i, (dose, predictions) in enumerate(sorted(counterfactual_results.items())):
+            color = colors[i]
+            plt.plot(predictions.index, predictions['predicted'], '--', 
+                    color=color, label=f'Dose: {dose}u', alpha=0.7)
+            
+            # Highlight time-in-range regions
+            in_range_idx = ((predictions['predicted'] >= low_threshold) & 
+                           (predictions['predicted'] <= high_threshold))
+            
+            if any(in_range_idx):
+                plt.scatter(
+                    predictions.index[in_range_idx], 
+                    predictions['predicted'][in_range_idx],
+                    color=color, marker='o', s=30, alpha=0.8
+                )
+                
+            # Calculate time in range percentage
+            time_in_range = in_range_idx.mean() * 100
+            plt.plot([], [], ' ', label=f'TIR ({dose}u): {time_in_range:.1f}%')
+            
+        # Mark intervention
+        plt.axvline(x=intervention_time, color='k', linestyle='-', label='Intervention')
+        
+        # Add horizontal lines for target ranges
+        plt.axhspan(low_threshold, high_threshold, color='g', alpha=0.1, label='Target Range')
+        plt.axhline(y=high_threshold, color='r', linestyle=':', alpha=0.7)
+        plt.axhline(y=low_threshold, color='r', linestyle=':', alpha=0.7)
+        
+        plt.xlabel('Time')
+        plt.ylabel(target_col)
+        plt.title(f'Counterfactual Dose Comparison with Time in Range ({low_threshold}-{high_threshold} mg/dL)')
+        plt.legend(loc='best', bbox_to_anchor=(1.05, 1), fontsize='small')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        
+        if output_path:
+            plt.savefig(output_path)
+            plt.close()
+            print(f"Plot saved to {output_path}")
+        else:
+            plt.show()

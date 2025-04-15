@@ -33,6 +33,9 @@ from its_package.data_handling.event_detection import detect_insulin_events
 # Create output directory
 output_dir = "output/dose_counterfactual_analysis"
 os.makedirs(output_dir, exist_ok=True)
+# Create models subdirectory
+models_dir = os.path.join(output_dir, "models")
+os.makedirs(models_dir, exist_ok=True)
 
 def train_its_models():
     """Train ITS models on the synthetic glucose dataset"""
@@ -48,7 +51,7 @@ def train_its_models():
     print(f"Detected {len(events)} insulin events for training")
     
     # Initialize model trainer
-    trainer = ITSModelTrainer(output_dir=output_dir)
+    trainer = ITSModelTrainer(output_dir=models_dir)
     
     # Train models on all events
     training_results = trainer.train_models(
@@ -56,10 +59,15 @@ def train_its_models():
         event_times=events,
         model_types=["causalimpact", "statsmodels"],
         pre_window="45min",
-        post_window="30min",
+        post_window="120min",
         target_col="glucose",
         evaluate_prediction=True  # This enables the prediction-based evaluation
     )
+    
+    # Print training summary
+    print("\nTraining Summary:")
+    print(f"Number of events processed: {len(training_results)}")
+    print(f"Model types: {', '.join(training_results[0]['model_types'] if training_results else [])}")
     
     # Save trained models
     saved_paths = trainer.save_models(base_filename="glucose_its_models")
@@ -277,7 +285,7 @@ def explore_counterfactuals(predictor, event_time, pre_period_data, actual_dose)
         intervention_time=event_time,
         actual_dose=actual_dose,
         counterfactual_doses=counterfactual_doses,
-        post_period_length="3h",
+        post_period_length="2h",
         model_type="ensemble",
         time_frequency="5min"
     )
@@ -294,28 +302,41 @@ def explore_counterfactuals(predictor, event_time, pre_period_data, actual_dose)
     
     print(f"Counterfactual comparison plot saved to {output_path}")
     
-    # Find optimal dose to reach target glucose of 100 mg/dL at 2 hours post-intervention
-    target_glucose = 100
-    time_point = event_time + pd.Timedelta("2h")
+    # Define target range for glucose (healthy range)
+    low_threshold = 70  # mg/dL - lower bound for healthy glucose
+    high_threshold = 180  # mg/dL - upper bound for healthy glucose
     
-    print(f"\nFinding optimal dose to reach {target_glucose} mg/dL at {time_point}")
+    print(f"\nFinding optimal dose to maximize time in range ({low_threshold}-{high_threshold} mg/dL)")
     
-    optimal_result = predictor.find_optimal_dose(
+    # Use maximize_time_in_range instead of find_optimal_dose
+    optimal_result = predictor.maximize_time_in_range(
         pre_period_data=pre_period_data,
         intervention_time=event_time,
         dose_range=(0.0, actual_dose*2),
-        target_glucose=target_glucose,
-        time_point=time_point,
-        post_period="3h",
+        low_threshold=low_threshold,
+        high_threshold=high_threshold,
+        post_period="2h",
         model_type="ensemble",
         n_steps=20
     )
     
-    # Save the dose-response plot
-    output_path = os.path.join(output_dir, "optimal_dose.png")
+    # Plot time in range comparison for different doses
+    output_path = os.path.join(output_dir, "tir_comparison.png")
+    predictor.plot_time_in_range_comparison(
+        pre_period_data=pre_period_data,
+        counterfactual_results=counterfactual_results,
+        intervention_time=event_time,
+        low_threshold=low_threshold,
+        high_threshold=high_threshold,
+        output_path=output_path
+    )
+    print(f"Time in range comparison plot saved to {output_path}")
+    
+    # Save the TIR optimization plot
+    output_path = os.path.join(output_dir, "optimal_tir_dose.png")
     plt.savefig(output_path)
     plt.close()
-    print(f"Dose-response plot saved to {output_path}")
+    print(f"Time-in-range optimization plot saved to {output_path}")
     
     return optimal_result
 
@@ -323,8 +344,8 @@ def main():
     """Main function to run the example"""
     
     # Check if models already exist
-    ci_model_path = os.path.join(output_dir, "glucose_its_models_causalimpact.pkl")
-    sm_model_path = os.path.join(output_dir, "glucose_its_models_statsmodels.pkl")
+    ci_model_path = os.path.join(models_dir, "glucose_its_models_causalimpact.pkl")
+    sm_model_path = os.path.join(models_dir, "glucose_its_models_statsmodels.pkl")
     
     if os.path.exists(ci_model_path) and os.path.exists(sm_model_path):
         print("Using existing trained models")
@@ -343,9 +364,12 @@ def main():
     optimal_result = explore_counterfactuals(predictor, event_time, pre_period_data, actual_dose)
     
     print("\n=== Summary ===")
-    print(f"For optimal blood glucose of {optimal_result['target_glucose']} mg/dL at {optimal_result['time_point']}:")
+    print(f"For optimal Time In Range ({optimal_result['below_range'] + optimal_result['optimal_tir']:.1f}%):")
+    print(f"Target glucose range: {optimal_result.get('low_threshold', 70)}-{optimal_result.get('high_threshold', 180)} mg/dL")
     print(f"Recommended insulin dose: {optimal_result['optimal_dose']:.2f}u")
-    print(f"Expected glucose level: {optimal_result['optimal_glucose']:.1f} mg/dL")
+    print(f"Expected time in range: {optimal_result['optimal_tir']:.1f}%")
+    print(f"Expected mean glucose: {optimal_result['mean_glucose']:.1f} mg/dL")
+    print(f"Below range: {optimal_result['below_range']:.1f}%, Above range: {optimal_result['above_range']:.1f}%")
     print(f"Actual dose used: {actual_dose:.2f}u")
     
     print("\nExample complete! All outputs saved to:", output_dir)

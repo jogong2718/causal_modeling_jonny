@@ -517,3 +517,403 @@ class InterventionPredictor:
             print(f"Plot saved to {output_path}")
         else:
             plt.show()
+    
+    def find_optimal_dose(self, pre_period_data, intervention_time, dose_range,
+                       target_glucose=100, time_point=None, model_type="ensemble", n_steps=10):
+        """
+        Find the optimal insulin dose to achieve a target glucose level at a specific time.
+        
+        Parameters:
+        -----------
+        pre_period_data : DataFrame
+            Data for the pre-intervention period
+        intervention_time : datetime or str
+            Time of intervention
+        dose_range : tuple
+            (min_dose, max_dose) range to search
+        target_glucose : float
+            Target glucose level to aim for
+        time_point : datetime or str
+            Time point at which to achieve target glucose
+        model_type : str, optional
+            Type of model to use for prediction
+        n_steps : int, optional
+            Number of doses to evaluate in the range
+            
+        Returns:
+        --------
+        dict
+            Results of optimization including optimal dose
+        """
+        min_dose, max_dose = dose_range
+        doses = np.linspace(min_dose, max_dose, n_steps)
+        
+        # Convert intervention_time to datetime if it's a string
+        if isinstance(intervention_time, str):
+            intervention_time = pd.to_datetime(intervention_time)
+            
+        # Set time_point if not provided
+        if time_point is None:
+            time_point = intervention_time + pd.Timedelta('2h')  # Default 2 hours after intervention
+        elif isinstance(time_point, str):
+            if "+" in time_point:  # Relative time format like "+2h"
+                offset = time_point.strip("+")
+                time_point = intervention_time + pd.Timedelta(offset)
+            else:
+                time_point = pd.to_datetime(time_point)
+        
+        # Get predictions for each dose
+        predictions_at_time = {}
+        dose_values = []
+        glucose_values = []
+        
+        for dose in doses:
+            prediction = self.predict(
+                pre_period_data=pre_period_data,
+                intervention_time=intervention_time,
+                post_period_length=time_point - intervention_time,
+                intervention_value=dose,
+                model_type=model_type
+            )
+            
+            # Get predicted glucose at time_point
+            if time_point in prediction.index:
+                glucose_at_time = prediction.loc[time_point, 'predicted']
+            else:
+                # Find closest time point
+                closest_time = prediction.index[prediction.index <= time_point].max()
+                if pd.isna(closest_time):
+                    closest_time = prediction.index[prediction.index >= time_point].min()
+                glucose_at_time = prediction.loc[closest_time, 'predicted']
+            
+            predictions_at_time[dose] = {
+                'glucose': glucose_at_time,
+                'prediction': prediction
+            }
+            
+            dose_values.append(dose)
+            glucose_values.append(glucose_at_time)
+        
+        # Find optimal dose (closest to target)
+        differences = [abs(g - target_glucose) for g in glucose_values]
+        optimal_idx = np.argmin(differences)
+        optimal_dose = dose_values[optimal_idx]
+        optimal_glucose = glucose_values[optimal_idx]
+        
+        print(f"Optimal dose: {optimal_dose:.2f}u → Predicted glucose at {time_point}: {optimal_glucose:.1f} mg/dL (Target: {target_glucose} mg/dL)")
+        
+        # Create figure showing dose-response relationship
+        plt.figure(figsize=(10, 6))
+        plt.plot(dose_values, glucose_values, 'bo-')
+        plt.axvline(x=optimal_dose, color='r', linestyle='--', label=f'Optimal: {optimal_dose:.2f}u')
+        plt.axhline(y=target_glucose, color='g', linestyle='--', label=f'Target: {target_glucose} mg/dL')
+        plt.xlabel('Insulin Dose (units)')
+        plt.ylabel('Predicted Glucose (mg/dL)')
+        plt.title(f'Insulin Dose vs. Predicted Glucose at {time_point}')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        return {
+            'optimal_dose': optimal_dose,
+            'optimal_glucose': optimal_glucose,
+            'target_glucose': target_glucose,
+            'time_point': time_point,
+            'dose_response': dict(zip(dose_values, glucose_values)),
+            'all_predictions': predictions_at_time
+        }
+        
+    def predict_glucose(self, pre_period_data, intervention_time, post_period_length, 
+                      intervention_value=None, model_type="causalimpact", time_frequency='5min'):
+        """
+        Predict glucose values after an intervention.
+        This is a wrapper around predict() that supports ensemble predictions.
+        
+        Parameters:
+        -----------
+        pre_period_data : DataFrame
+            Time series data for the pre-intervention period
+        intervention_time : datetime or str
+            Time of intervention
+        post_period_length : str
+            Length of post period (e.g., '1h', '2h')
+        intervention_value : float, optional
+            Insulin dose or other intervention value
+        model_type : str
+            Type of model to use: 'causalimpact', 'statsmodels', or 'ensemble'
+        time_frequency : str
+            Frequency of time series data
+            
+        Returns:
+        --------
+        DataFrame
+            Predicted glucose values
+        """
+        # Convert intervention_time to datetime if it's a string
+        if isinstance(intervention_time, str):
+            intervention_time = pd.to_datetime(intervention_time)
+            
+        # For ensemble prediction, we need both model types
+        if model_type == "ensemble":
+            # Get predictions from both models
+            self.model_type = "causalimpact"
+            ci_predictions = self.predict(
+                pre_period_data, 
+                intervention_time, 
+                post_period_length, 
+                intervention_value,
+                time_frequency
+            )
+            
+            self.model_type = "statsmodels_its"
+            sm_predictions = self.predict(
+                pre_period_data, 
+                intervention_time, 
+                post_period_length, 
+                intervention_value,
+                time_frequency
+            )
+            
+            # Combine predictions (simple average)
+            combined_predictions = ci_predictions.copy()
+            combined_predictions['predicted'] = (ci_predictions['predicted'] + sm_predictions['predicted']) / 2
+            
+            # Average confidence intervals too
+            if 'lower' in ci_predictions.columns and 'lower' in sm_predictions.columns:
+                combined_predictions['lower'] = (ci_predictions['lower'] + sm_predictions['lower']) / 2
+                combined_predictions['upper'] = (ci_predictions['upper'] + sm_predictions['upper']) / 2
+                
+            return combined_predictions
+            
+        else:
+            # Use the specified model type
+            self.model_type = model_type
+            return self.predict(
+                pre_period_data, 
+                intervention_time, 
+                post_period_length, 
+                intervention_value,
+                time_frequency
+            )
+    
+    def maximize_time_in_range(self, pre_period_data, intervention_time, dose_range,
+                              low_threshold=80, high_threshold=130, post_period="2h", 
+                              model_type="ensemble", n_steps=10):
+        """
+        Find the optimal insulin dose that maximizes time in range (TIR) for glucose.
+        
+        Parameters:
+        -----------
+        pre_period_data : DataFrame
+            Data for the pre-intervention period
+        intervention_time : datetime or str
+            Time of intervention
+        dose_range : tuple
+            (min_dose, max_dose) range to search
+        low_threshold : float
+            Lower bound of target glucose range
+        high_threshold : float
+            Upper bound of target glucose range
+        post_period : str
+            Length of post-intervention period to consider
+        model_type : str, optional
+            Type of model to use for prediction
+        n_steps : int, optional
+            Number of doses to evaluate in the range
+            
+        Returns:
+        --------
+        dict
+            Results of optimization including optimal dose and TIR metrics
+        """
+        min_dose, max_dose = dose_range
+        doses = np.linspace(min_dose, max_dose, n_steps)
+        
+        # Convert intervention_time to datetime if it's a string
+        if isinstance(intervention_time, str):
+            intervention_time = pd.to_datetime(intervention_time)
+        
+        # Get predictions for each dose
+        tir_results = []
+        dose_values = []
+        tir_values = []
+        
+        for dose in doses:
+            prediction = self.predict_glucose(
+                pre_period_data=pre_period_data,
+                intervention_time=intervention_time,
+                post_period_length=post_period,
+                intervention_value=dose,
+                model_type=model_type
+            )
+            
+            # Calculate time in range metrics
+            total_points = len(prediction)
+            in_range = ((prediction['predicted'] >= low_threshold) & 
+                        (prediction['predicted'] <= high_threshold)).sum()
+            below_range = (prediction['predicted'] < low_threshold).sum()
+            above_range = (prediction['predicted'] > high_threshold).sum()
+            
+            # Calculate percentages
+            tir_percentage = (in_range / total_points) * 100
+            below_percentage = (below_range / total_points) * 100
+            above_percentage = (above_range / total_points) * 100
+            
+            # Calculate mean glucose
+            mean_glucose = prediction['predicted'].mean()
+            
+            result = {
+                'dose': dose,
+                'tir': tir_percentage,
+                'below_range': below_percentage,
+                'above_range': above_percentage,
+                'mean_glucose': mean_glucose,
+                'prediction': prediction
+            }
+            
+            tir_results.append(result)
+            dose_values.append(dose)
+            tir_values.append(tir_percentage)
+        
+        # Find optimal dose (highest TIR)
+        optimal_idx = np.argmax(tir_values)
+        optimal_dose = dose_values[optimal_idx]
+        optimal_tir = tir_values[optimal_idx]
+        optimal_result = tir_results[optimal_idx]
+        
+        print(f"Optimal dose for maximum time in range ({low_threshold}-{high_threshold} mg/dL): {optimal_dose:.2f}u")
+        print(f"Expected time in range: {optimal_tir:.1f}%")
+        print(f"Expected mean glucose: {optimal_result['mean_glucose']:.1f} mg/dL")
+        
+        # Create figure showing dose-TIR relationship
+        plt.figure(figsize=(10, 6))
+        plt.plot(dose_values, tir_values, 'bo-')
+        plt.axvline(x=optimal_dose, color='r', linestyle='--', label=f'Optimal: {optimal_dose:.2f}u')
+        plt.xlabel('Insulin Dose (units)')
+        plt.ylabel('Time in Range (%)')
+        plt.title(f'Insulin Dose vs. Time in Range ({low_threshold}-{high_threshold} mg/dL)')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        return {
+            'optimal_dose': optimal_dose,
+            'optimal_tir': optimal_tir,
+            'below_range': optimal_result['below_range'],
+            'above_range': optimal_result['above_range'],
+            'mean_glucose': optimal_result['mean_glucose'],
+            'all_results': tir_results
+        }
+        
+    def plot_time_in_range_comparison(self, pre_period_data, counterfactual_results, intervention_time,
+                                    low_threshold=80, high_threshold=130, output_path=None):
+        """
+        Plot comparison of different doses showing time in range metrics.
+        
+        Parameters:
+        -----------
+        pre_period_data : DataFrame
+            Original pre-period data
+        counterfactual_results : dict
+            Dictionary of prediction dataframes for different doses
+        intervention_time : datetime
+            Time of intervention
+        low_threshold : float
+            Lower bound of target glucose range
+        high_threshold : float
+            Upper bound of target glucose range
+        output_path : str, optional
+            Path to save the plot
+        """
+        target_col = 'glucose' if 'glucose' in pre_period_data.columns else 'response'
+        
+        # Create a figure with two subplots
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), height_ratios=[3, 1])
+        
+        # Plot 1: Glucose trends for each dose
+        # Plot pre-period data
+        ax1.plot(pre_period_data.index, pre_period_data[target_col], 'b-', label='Historical Data')
+        
+        # Define a color map for different doses
+        colors = ['r', 'g', 'purple', 'orange', 'c', 'm', 'gray', 'brown']
+        
+        # Track TIR metrics for bar chart
+        doses = []
+        tir_values = []
+        below_values = []
+        above_values = []
+        labels = []
+        
+        # Plot each counterfactual prediction
+        for i, (dose_key, prediction_df) in enumerate(counterfactual_results.items()):
+            color = colors[i % len(colors)]
+            
+            if dose_key == 0.0 or str(dose_key) == '0.0':
+                label = 'No insulin'
+            else:
+                label = f'Dose {dose_key}u'
+                
+            labels.append(label)
+            
+            # Plot glucose prediction
+            ax1.plot(prediction_df.index, prediction_df['predicted'], 
+                    color=color, linestyle='-', label=label,
+                    linewidth=2)
+            
+            # Calculate time in range metrics
+            total_points = len(prediction_df)
+            in_range = ((prediction_df['predicted'] >= low_threshold) & 
+                      (prediction_df['predicted'] <= high_threshold)).sum()
+            below_range = (prediction_df['predicted'] < low_threshold).sum()
+            above_range = (prediction_df['predicted'] > high_threshold).sum()
+            
+            # Calculate percentages
+            tir_percentage = (in_range / total_points) * 100
+            below_percentage = (below_range / total_points) * 100
+            above_percentage = (above_range / total_points) * 100
+            
+            # Store for bar chart
+            doses.append(dose_key)
+            tir_values.append(tir_percentage)
+            below_values.append(below_percentage)
+            above_values.append(above_percentage)
+        
+        # Add target range
+        ax1.axhline(y=high_threshold, color='red', linestyle='--', alpha=0.7, label=f'Target Range ({low_threshold}-{high_threshold} mg/dL)')
+        ax1.axhline(y=low_threshold, color='red', linestyle='--', alpha=0.7)
+        ax1.axhspan(low_threshold, high_threshold, alpha=0.1, color='green')
+        
+        # Mark intervention
+        ax1.axvline(x=intervention_time, color='k', linestyle='-', label='Insulin Dose')
+        
+        ax1.set_xlabel('Time')
+        ax1.set_ylabel('Glucose (mg/dL)')
+        ax1.set_title('Predicted Glucose Response with Different Insulin Doses')
+        ax1.legend(loc='best')
+        ax1.grid(True, alpha=0.3)
+        
+        # Plot 2: Bar chart of time in range metrics
+        width = 0.25  # width of bars
+        x = np.arange(len(doses))  # label locations
+        
+        # Create bars
+        ax2.bar(x - width, tir_values, width, label='In Range', color='green')
+        ax2.bar(x, below_values, width, label='Below Range', color='blue')
+        ax2.bar(x + width, above_values, width, label='Above Range', color='red')
+        
+        # Add labels and legend
+        ax2.set_xlabel('Insulin Dose')
+        ax2.set_ylabel('Percentage (%)')
+        ax2.set_title('Time in Range Metrics by Dose')
+        ax2.set_xticks(x)
+        ax2.set_xticklabels(labels)
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        # Adjust layout and save
+        plt.tight_layout()
+        
+        if output_path:
+            plt.savefig(output_path)
+            plt.close()
+            print(f"Time-in-range comparison plot saved to {output_path}")
+        else:
+            plt.show()

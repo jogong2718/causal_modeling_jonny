@@ -22,6 +22,8 @@ class StatsmodelsITSModel(BaseITSModel):
         self.data = None
         self.target_col = None
         self.intervention_time = None
+        self.formula = None
+        self.params = None
     
     def fit(self, data, pre_period, post_period, target_col='glucose', time_unit='minutes'):
         """
@@ -75,9 +77,12 @@ class StatsmodelsITSModel(BaseITSModel):
         self.target_col = target_col
         
         # Fit the model
-        formula = f"{target_col} ~ time + post + time_post"
-        model = smf.ols(formula, data=window_data)
+        self.formula = f"{target_col} ~ time + post + time_post"
+        model = smf.ols(self.formula, data=window_data)
         self.results = model.fit()
+        
+        # Store parameters for easy access in prediction
+        self.params = self.results.params
         
         return self
     
@@ -196,7 +201,8 @@ class StatsmodelsITSModel(BaseITSModel):
                 'training_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 'target_col': self.target_col,
                 'intervention_time': self.intervention_time,
-                'formula': self.formula
+                'formula': self.formula,
+                'params': self.params.to_dict() if self.params is not None else None
             }
         }
         
@@ -204,4 +210,35 @@ class StatsmodelsITSModel(BaseITSModel):
             pickle.dump(model_data, f)
         
         print(f"Model saved to {filename}")
+        return filename
+        
+    def save_plot(self, filename=None):
+        """
+        Save plot to a file.
+        
+        Parameters:
+        -----------
+        filename : str, optional
+            Filename to save plot to. If None, a default name will be used.
+            
+        Returns:
+        --------
+        str
+            Path to saved plot
+        """
+        if filename is None and self.output_dir:
+            time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"statsmodels_its_plot_{time_str}.png"
+            filename = os.path.join(self.output_dir, filename)
+        elif filename is None:
+            time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"statsmodels_its_plot_{time_str}.png"
+        
+        # Create plot
+        fig = self.plot()
+        
+        # Save it
+        fig.savefig(filename)
+        plt.close(fig)
+        
         return filename

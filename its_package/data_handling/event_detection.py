@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from ..utils.time_utils import find_filtered_events
 
-def detect_insulin_events(data, insulin_column='insulin', threshold=0, min_gap_hours=1):
+def detect_insulin_events(data, insulin_column='insulin', threshold=0, min_gap_hours=1, max_events=None):
     """
     Detect insulin administration events in the data
     
@@ -16,20 +16,28 @@ def detect_insulin_events(data, insulin_column='insulin', threshold=0, min_gap_h
         Minimum insulin value to consider as an event
     min_gap_hours : float
         Minimum gap between events in hours
+    max_events : int, optional
+        Maximum number of events to return
         
     Returns:
     --------
     list
         List of event times
     """
-    return find_filtered_events(
+    events = find_filtered_events(
         data=data,
         event_column=insulin_column,
         event_threshold=threshold,
         min_gap_seconds=min_gap_hours * 3600
     )
+    
+    # Limit number of events if specified
+    if max_events is not None:
+        events = events[:max_events]
+        
+    return events
 
-def detect_meal_events(data, meal_column='carbs', threshold=0, min_gap_hours=1):
+def detect_meal_events(data, meal_column='carbs', threshold=0, min_gap_hours=1, max_events=None):
     """
     Detect meal events in the data
     
@@ -43,18 +51,26 @@ def detect_meal_events(data, meal_column='carbs', threshold=0, min_gap_hours=1):
         Minimum meal value to consider as an event
     min_gap_hours : float
         Minimum gap between events in hours
+    max_events : int, optional
+        Maximum number of events to return
         
     Returns:
     --------
     list
         List of event times
     """
-    return find_filtered_events(
+    events = find_filtered_events(
         data=data,
         event_column=meal_column,
         event_threshold=threshold,
         min_gap_seconds=min_gap_hours * 3600
     )
+    
+    # Limit number of events if specified
+    if max_events is not None:
+        events = events[:max_events]
+        
+    return events
 
 def get_event_values(data, events, column):
     """

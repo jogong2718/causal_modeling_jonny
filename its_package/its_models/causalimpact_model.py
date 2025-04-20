@@ -100,8 +100,8 @@ class CausalImpactModel(BaseITSModel):
         post_inferences = self.impact.inferences.loc[self.impact.inferences.index >= self.post_period[0]]
         
         # Calculate mean effect
-        avg_effect = post_inferences['point_effects'].mean()
-        cum_effect = post_inferences['post_cum_effects'].iloc[-1]
+        avg_effect = post_inferences['point_effect'].mean()
+        cum_effect = post_inferences['cum_effect'].iloc[-1]
         
         # Calculate p-value
         p_value = self.impact.summary_data.get('p', 1.0)
@@ -223,31 +223,53 @@ class CausalImpactModel(BaseITSModel):
             Name of the file to save the model to
         """
         if self.output_dir is None:
-            raise ValueError("Output directory not set")
+            self.output_dir = os.path.dirname(filename)
         
         if filename is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"causalimpact_model_{timestamp}.json"
-        
-        filepath = os.path.join(self.output_dir, filename)
+            filepath = os.path.join(self.output_dir, filename)
+        else:
+            filepath = filename
         
         if self.impact is None:
             raise ValueError("Model has not been fit yet")
         
-        # Get the summary data
-        summary_data = self.impact.summary_data
+        # Extract summary data from the impact object
+        # The CausalImpact object might not have summary_data directly
+        # Instead we'll use the data we can access safely
+        try:
+            # Try to get summary from report if available
+            report = self.impact.summary()
+            summary_data = {'report': report}
+        except:
+            # Fallback to a more basic summary
+            summary_data = {}
+        
+        # Add model parameters and results data that's safely accessible
+        post_data = self.impact.inferences.loc[self.impact.inferences.index >= self.post_period[0]]
+        avg_effect = float(post_data['point_effect'].mean())
+        cum_effect = float(post_data['cum_effect'].iloc[-1])
         
         # Convert to serializable format
         results = {
             'pre_period': [str(x) for x in self.pre_period],
             'post_period': [str(x) for x in self.post_period],
-            'summary': {k: float(v) if isinstance(v, (int, float, np.number)) else str(v) 
-                       for k, v in summary_data.items()}
+            'avg_effect': avg_effect,
+            'cum_effect': cum_effect,
+            'summary': summary_data
         }
         
-        # Save to file
-        import json
-        with open(filepath, 'w') as f:
-            json.dump(results, f, indent=4)
+        # Save to file - use pickle instead of json for more complete object serialization
+        import pickle
+        with open(filepath, 'wb') as f:
+            pickle.dump(results, f)
         
-        print(f"Model saved to {filepath}")
+        # Also save the entire model object for full preservation
+        model_filepath = filepath.replace('.json', '.pkl') if filepath.endswith('.json') else filepath
+        with open(model_filepath, 'wb') as f:
+            pickle.dump(self, f)
+        
+        print(f"Model saved to {model_filepath}")
+        
+        return model_filepath

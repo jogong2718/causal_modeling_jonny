@@ -58,8 +58,8 @@ def train_its_models():
         data=data,
         event_times=events,
         model_types=["causalimpact", "statsmodels"],
-        pre_window="45min",
-        post_window="120min",
+        pre_window="43200min",
+        post_window="240min",
         target_col="glucose",
         evaluate_prediction=True  # This enables the prediction-based evaluation
     )
@@ -67,7 +67,16 @@ def train_its_models():
     # Print training summary
     print("\nTraining Summary:")
     print(f"Number of events processed: {len(training_results)}")
-    print(f"Model types: {', '.join(training_results[0]['model_types'] if training_results else [])}")
+    # Check if training_results is a list and has model_types in the first item
+    if training_results and isinstance(training_results, list) and training_results[0] and 'models_trained' in training_results[0]:
+        model_types = list(training_results[0]['models_trained'].keys())
+        print(f"Model types: {', '.join(model_types)}")
+    elif training_results and isinstance(training_results, dict) and 'models_trained' in training_results:
+        # Handle case where it might be a single dictionary
+        model_types = list(training_results['models_trained'].keys())
+        print(f"Model types: {', '.join(model_types)}")
+    else:
+        print("No model types information available in training results")
     
     # Save trained models
     saved_paths = trainer.save_models(base_filename="glucose_its_models")
@@ -108,7 +117,7 @@ def make_predictions(model_paths):
     print(f"Selected event at {prediction_event} for prediction")
     
     # Extract pre-period data for this event
-    pre_window = "45min"
+    pre_window = "43200min"
     pre_start = prediction_event - pd.Timedelta(pre_window)
     pre_period_data = data.loc[pre_start:prediction_event].copy()
     
@@ -137,7 +146,7 @@ def make_predictions(model_paths):
         model_types.append("ensemble")
     
     # Extract post-period data for validation
-    post_window = "2h"
+    post_window = "4h"
     post_end = prediction_event + pd.Timedelta(post_window)
     actual_post_data = data.loc[prediction_event:post_end].copy()
     
@@ -150,7 +159,7 @@ def make_predictions(model_paths):
         predictions = predictor.predict_glucose(
             pre_period_data=pre_period_data,
             intervention_time=prediction_event,
-            post_period_length="2h",
+            post_period_length="4h",
             intervention_value=actual_dose,
             model_type=model_type,
             time_frequency="5min"
@@ -285,7 +294,7 @@ def explore_counterfactuals(predictor, event_time, pre_period_data, actual_dose)
         intervention_time=event_time,
         actual_dose=actual_dose,
         counterfactual_doses=counterfactual_doses,
-        post_period_length="2h",
+        post_period_length="4h",
         model_type="ensemble",
         time_frequency="5min"
     )
@@ -315,7 +324,7 @@ def explore_counterfactuals(predictor, event_time, pre_period_data, actual_dose)
         dose_range=(0.0, actual_dose*2),
         low_threshold=low_threshold,
         high_threshold=high_threshold,
-        post_period="2h",
+        post_period="4h",
         model_type="ensemble",
         n_steps=20
     )
